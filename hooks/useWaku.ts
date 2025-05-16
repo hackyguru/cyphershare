@@ -15,7 +15,9 @@ const FileMessage = new protobuf.Type("FileMessage")
   .add(new protobuf.Field("fileName", 3, "string"))
   .add(new protobuf.Field("fileSize", 4, "float"))
   .add(new protobuf.Field("fileType", 5, "string"))
-  .add(new protobuf.Field("fileId", 6, "string")); // CID of the file
+  .add(new protobuf.Field("fileId", 6, "string")) // CID of the file
+  .add(new protobuf.Field("isEncrypted", 7, "bool"))
+  .add(new protobuf.Field("accessCondition", 8, "string")); // Description of access condition
 
 // Correct content topic format following Waku protocol specification
 // Format: /{application-name}/{version}/{content-topic-name}/{encoding}
@@ -28,6 +30,8 @@ export interface WakuFileMessage {
   fileSize: number;
   fileType: string;
   fileId: string;
+  isEncrypted?: boolean;
+  accessCondition?: string;
 }
 
 export interface UseWakuOptions {
@@ -216,6 +220,8 @@ export const useWaku = ({
     fileSize: number;
     fileType: string;
     fileId: string;
+    isEncrypted?: boolean;
+    accessCondition?: string;
   }) => {
     if (!node || !encoder || !isConnected) {
       console.error('Cannot send message: Waku node is not connected', {
@@ -263,6 +269,8 @@ export const useWaku = ({
         fileSize: fileData.fileSize,
         fileType: fileData.fileType,
         fileId: fileData.fileId,
+        isEncrypted: fileData.isEncrypted || false,
+        accessCondition: fileData.accessCondition || ''
       });
 
       // Serialize the message using Protobuf

@@ -1,10 +1,12 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Button } from "@/components/ui/button";
+import { WalletConnectButton } from "@/components/wallet-connect-button";
+import { useWallet } from "@/context/wallet-context";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Geist, Geist_Mono } from "next/font/google";
-import { Upload, Download, FileIcon, Copy, Edit, Check, File, FileText, Image, Github, Settings, Server, Radio, Terminal, AlertCircle, Info, Waypoints } from "lucide-react";
+import { Upload, Download, FileIcon, Copy, Edit, Check, File, FileText, Image, Github, Settings, Server, Radio, Terminal, AlertCircle, Info, Waypoints, Lock, Unlock, Shield } from "lucide-react";
 import Head from "next/head";
 import { useDropzone } from "react-dropzone";
 import { 
@@ -21,6 +23,24 @@ import { useCodex, CodexClient, getCodexClient } from "@/hooks/useCodex";
 import useWaku, { WakuFileMessage } from "@/hooks/useWaku";
 import axios from "axios";
 import { cn } from "@/lib/utils";
+import { domains } from "@nucypher/taco";
+import useTaco from "@/hooks/useTaco";
+import { ethers } from "ethers";
+import { Switch } from "@/components/ui/switch";
+import { Label } from "@/components/ui/label";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+  TooltipProvider
+} from "@/components/ui/tooltip";
+
+declare global {
+  interface Window {
+    ethereum?: any;
+  }
+}
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -40,6 +60,8 @@ interface FileItem {
   type: string;
   timestamp: string;
   fileId?: string; // Codex file ID
+  isEncrypted?: boolean; // Whether the file is encrypted with TACo
+  accessCondition?: string; // Description of access condition
 }
 
 // Update ExtendedNodeInfo interface
@@ -63,10 +85,62 @@ export default function Home() {
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [nodeInfo, setNodeInfo] = useState<ExtendedNodeInfo | null>(null);
   
+  // TACo integration state
+  const { provider, signer, walletConnected, connectWallet } = useWallet();
+  const timeInputRef = useRef<HTMLDivElement>(null);
+  const useEncryptionInputRef = useRef<HTMLDivElement>(null);
+  const [useEncryption, setUseEncryption] = useState(false);
+  const [accessConditionType, setAccessConditionType] = useState<'time' | 'positive'>('positive');
+  
+  // Effect to scroll to the time input section when selected
+  useEffect(() => {
+    if (accessConditionType === 'time' && timeInputRef.current) {
+      // Small delay to ensure DOM is updated
+      setTimeout(() => {
+        timeInputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }, 100);
+    }
+  }, [accessConditionType]);
+  // Effect to scroll to the useEncryption input section when selected
+  useEffect(() => {
+    if (useEncryption && useEncryptionInputRef.current) {
+      // Small delay to ensure DOM is updated
+      setTimeout(() => {
+        useEncryptionInputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }, 100);
+    }
+  }, [useEncryption]);
+  const [windowTimeSeconds, setWindowTimeSeconds] = useState('60'); // Default to 1 minute (60 seconds)
+  const [decryptionInProgress, setDecryptionInProgress] = useState<Record<string, boolean>>({});
+  const [decryptionError, setDecryptionError] = useState<string | null>(null);
+  
+  // TACo ritual ID and domain
+  const ritualId = 6; // Update with your actual ritual ID if needed
+  
+  // Initialize TACo hooks
+  const { 
+    isInit: isTacoInit, 
+    encryptDataToBytes, 
+    decryptDataFromBytes,
+    createConditions
+  } = useTaco({
+    provider: provider as ethers.providers.Provider | undefined,
+    domain: domains.TESTNET, // Using testnet
+    ritualId
+  });
+  
   const [sentFiles, setSentFiles] = useState<FileItem[]>([]);
   const [receivedFiles, setReceivedFiles] = useState<FileItem[]>([]);
   const [uploadingFiles, setUploadingFiles] = useState<{
-    [key: string]: { progress: number; name: string; size: number; type: string; }
+    [key: string]: { 
+      progress: number; 
+      name: string; 
+      size: number; 
+      type: string; 
+      timestamp?: string;
+      isEncrypted?: boolean;
+      accessCondition?: string;
+    }
   }>({});
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [copySuccess, setCopySuccess] = useState<string | null>(null);
@@ -133,7 +207,10 @@ export default function Home() {
     console.log('Received new file from peer:', {
       fileName: fileMessage.fileName,
       sender: fileMessage.sender,
-      fileId: fileMessage.fileId
+      fileId: fileMessage.fileId,
+      timestamp: fileMessage.timestamp,
+      encrypted: fileMessage.isEncrypted,
+      accessCondition: fileMessage.accessCondition
     });
     
     addWakuDebugLog('success', `New file from peer: ${fileMessage.fileName}`);
@@ -161,7 +238,9 @@ export default function Home() {
       size: fileMessage.fileSize,
       type: fileMessage.fileType,
       timestamp,
-      fileId: fileMessage.fileId
+      fileId: fileMessage.fileId,
+      isEncrypted: fileMessage.isEncrypted,
+      accessCondition: fileMessage.accessCondition
     };
     
     // Add to received files
@@ -222,7 +301,8 @@ export default function Home() {
     }
   }, [isCodexNodeActive, isCodexLoading, getNodeInfo]);
 
-  // Handle file drop - Modified to include Waku file sharing
+
+  // Handle file drop - Modified to include TACo encryption and Waku message sharing
   const onDrop = useCallback(async (acceptedFiles: File[]) => {
     if (!isCodexNodeActive) {
       setUploadError("Codex node is not active. Please check your connection.");
@@ -230,8 +310,19 @@ export default function Home() {
       return;
     }
 
+    // If encryption is enabled but wallet is not connected, prompt to connect
+    if (useEncryption && !walletConnected) {
+      const connected = await connectWallet();
+      if (!connected) {
+        setUploadError("Please connect your wallet to use encryption features.");
+        setTimeout(() => setUploadError(null), 5000);
+        return;
+      }
+    }
+
     // Process each file
     acceptedFiles.forEach(file => {
+      console.log("----------------------------- Processing file...");
       const fileId = `upload-${Date.now()}-${file.name}`;
       
       // Add file to uploading state
@@ -248,7 +339,70 @@ export default function Home() {
       // Upload file to Codex
       const uploadFile = async () => {
         try {
-          const result = await getCodexClient().uploadFile(file, (progress: number) => {
+          let fileToUpload = file;
+          let isFileEncrypted = false;
+          let accessConditionDescription = '';
+
+          // If encryption is enabled and we have a wallet connected, encrypt the file
+          if (useEncryption && walletConnected && signer) {
+            try {
+              // Create a condition based on selected type
+              let accessCondition;
+              
+              if (accessConditionType === 'positive') {
+                accessCondition = createConditions.positiveBalance();
+                accessConditionDescription = `The account needs to have a positive balance, to be able to decrypt this file`;
+              } else if (accessConditionType === 'time') {
+                accessCondition = await createConditions.withinNumberOfSeconds(Number(windowTimeSeconds));
+                accessConditionDescription = `Accessible only within ${windowTimeSeconds} seconds of  ${new Date().toLocaleTimeString()} (${new Date().toLocaleDateString()})`;
+              } else {
+                throw new Error('Invalid access condition type');
+              }
+              
+              // Read file as ArrayBuffer
+              const arrayBuffer = await file.arrayBuffer();
+              const fileBytes = new Uint8Array(arrayBuffer);
+              
+              console.log('Preparing to encrypt file...', {
+                fileName: file.name,
+                fileSize: fileBytes.length,
+                accessCondition: accessConditionDescription
+              });
+              
+              // Encrypt the file using TACo
+              try {
+                const encryptedBytes = await encryptDataToBytes(
+                  fileBytes,
+                  accessCondition,
+                  signer
+                );
+                
+                if (encryptedBytes) {
+                  // Wrap ciphertext into a File for Codex upload
+                  fileToUpload = new globalThis.File([encryptedBytes], `${file.name}.enc`, {
+                    type: 'application/octet-stream', // Use generic binary type
+                    lastModified: file.lastModified
+                  });
+                  
+                  isFileEncrypted = true;
+                  console.log('File encrypted successfully');
+                }
+              } catch (encryptError) {
+                console.log('Encryption error:', encryptError);
+                setUploadError(`Encryption failed: ${encryptError instanceof Error ? encryptError.message : 'Unknown error'}`);
+                setTimeout(() => setUploadError(null), 5000);
+                // Continue with unencrypted upload
+              }
+            } catch (conditionError) {
+              console.log('Error setting up access conditions:', conditionError);
+              setUploadError(`Error setting up access conditions: ${conditionError instanceof Error ? conditionError.message : 'Unknown error'}`);
+              setTimeout(() => setUploadError(null), 5000);
+              // Continue with unencrypted upload
+            }
+          }
+          
+          // Upload to Codex (either encrypted or original file)
+          const result = await getCodexClient().uploadFile(fileToUpload, (progress: number) => {
             // Update progress
             setUploadingFiles(prev => ({
               ...prev,
@@ -283,6 +437,8 @@ export default function Home() {
             const newFile: FileItem = {
               id: fileId,
               name: file.name,
+              isEncrypted: isFileEncrypted,
+              accessCondition: isFileEncrypted ? accessConditionDescription : undefined,
               size: parseFloat((file.size / (1024 * 1024)).toFixed(2)), // MB with 2 decimal places
               type: file.type,
               timestamp,
@@ -313,7 +469,9 @@ export default function Home() {
                   fileName: file.name,
                   fileSize: parseFloat((file.size / (1024 * 1024)).toFixed(2)),
                   fileType: file.type,
-                  fileId: result.id
+                  fileId: result.id,
+                  isEncrypted: isFileEncrypted,
+                  accessCondition: isFileEncrypted ? accessConditionDescription : undefined
                 });
                 console.log('File shared with peers via Waku');
               } catch (wakuError) {
@@ -539,65 +697,136 @@ export default function Home() {
     }
   };
 
-  // Handle file download
+  // Handle file download with potential decryption
   const handleDownloadFile = async (fileId: string) => {
     const file = sentFiles.find(f => f.id.toString() === fileId) || receivedFiles.find(f => f.id.toString() === fileId);
-    if (file && file.fileId) {
-      // Debug log for download
-      console.log('Downloading file:', {
-        fileId: fileId,
-        file: file,
-        cid: file.fileId
-      });
-      
-      try {
-        setCopySuccess(`Fetching file metadata...`);
+    if (!file) {
+      setUploadError('File not found');
+      return;
+    }
+    if (!file.fileId) {
+      setUploadError('File ID not found');
+      return;
+    }
+    
+    try {
+      setCopySuccess(`Fetching file metadata...`);
+      // If file is encrypted, we need to decrypt it after download
+      if (file.isEncrypted) {
+        // Check if wallet is connected
+        if (!walletConnected || !signer) {
+            setUploadError('You need to connect your wallet to decrypt this file');
+            setTimeout(() => setUploadError(null), 5000);
+            return;
+        }
+
+        setCopySuccess('File is encrypted, decrypting...');
         
-        // Download the file using the CodexClient
-        const result = await downloadFile(file.fileId);
+        // Start decryption process
+        setDecryptionInProgress(prev => ({ ...prev, [file.fileId!]: true }));
+        setDecryptionError(null);
         
-        if (!result.success || !result.data || !result.metadata) {
-          throw new Error(result.error || 'Failed to download file');
+        // Download encrypted data from Codex
+
+        setCopySuccess(`Fetching encrypted file (${file.name}) from Codex...`);
+        const encryptedData = await downloadFile(file.fileId);
+        if (!encryptedData || !encryptedData.data) {
+          throw new Error('Failed to download encrypted file data');
         }
         
-        // Get data from successful download
-        const { data: blob, metadata: { filename, mimetype } } = result;
+        // Convert blob to Uint8Array for decryption
+        const encryptedArrayBuffer = await encryptedData.data.arrayBuffer();
+        const encryptedBytes = new Uint8Array(encryptedArrayBuffer);
         
-        setCopySuccess(`Downloading ${filename}...`);
-        
-        // Create a download link for the file
-        const url = URL.createObjectURL(blob);
-        
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filename || file.name; // Use the filename from metadata or fallback to the file name we have
-        document.body.appendChild(a);
-        a.click();
-        
-        // Clean up
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-        
-        // Show success message
-        setCopySuccess(`File "${filename || file.name}" downloaded successfully`);
-        setTimeout(() => setCopySuccess(null), 3000);
-      } catch (error: unknown) {
-        console.error('Error downloading file:', error);
-        let errorMessage = 'Failed to download file';
-        
-        if (axios.isAxiosError(error)) {
-          errorMessage += `: ${error.response?.status || ''} ${error.message}`;
-          console.error('API error details:', error.response?.data);
-        } else if (error instanceof Error) {
-          errorMessage += `: ${error.message}`;
+        // Decrypt the data
+        try {
+          // Ensure signer exists before attempting to decrypt
+          // Due to react hooks, the signer variable is not updated immediately if `await connectWallet()` was called
+          if (!signer) {
+            setUploadError('Please go to settings and connect your wallet to decrypt this file');
+            setTimeout(() => setUploadError(null), 5000);
+            return;
+          }
+          setCopySuccess(`Decrypting encrypted file (${file.name})...`);
+          const decryptedBytes = await decryptDataFromBytes(encryptedBytes, signer);
+          
+          if (decryptedBytes) {
+            // The decrypted data is already in the right format with the updated TACo implementation
+            const originalBytes = new Uint8Array(decryptedBytes);
+            
+            setCopySuccess(`Downloading ${file.name}...`);
+            // Create a blob and download link
+            const blob = new Blob([originalBytes], { type: file.type || 'application/octet-stream' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = file.name;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            URL.revokeObjectURL(url);
+            
+            setCopySuccess(`Decrypted and downloaded ${file.name}`);
+            setTimeout(() => setCopySuccess(null), 3000);
+          } else {
+            throw new Error('Decryption returned no data');
+          }
+        } catch (decryptError) {
+          console.log('Decryption failed:', decryptError);
+          const message = `Failed to decrypt: ${(decryptError as Error)?.message?.indexOf('Threshold of responses not met;') !== -1
+            ? 'Access denied. Threshold of responses not met.' : (decryptError as Error).message}`;
+          setDecryptionError(message);
+          setTimeout(() => setDecryptionError(null), 5000);
+
+          setUploadError(message);      
+          setTimeout(() => setUploadError(null), 5000);
+        } finally {
+          setDecryptionInProgress(prev => ({ ...prev, [file.fileId!]: false }));
         }
-        
-        setUploadError(errorMessage);
-        setTimeout(() => setUploadError(null), 5000);
+      } else {
+          setCopySuccess(`Fetching file metadata...`);
+          
+          // Download the file using the CodexClient
+          const result = await downloadFile(file.fileId);
+          
+          if (!result.success || !result.data || !result.metadata) {
+            throw new Error(result.error || 'Failed to download file');
+          }
+          
+          // Get data from successful download
+          const { data: blob, metadata: { filename, mimetype } } = result;
+          
+          setCopySuccess(`Downloading ${filename}...`);
+          
+          // Create a download link for the file
+          const url = URL.createObjectURL(blob);
+          
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = filename || file.name; // Use the filename from metadata or fallback to the file name we have
+          document.body.appendChild(a);
+          a.click();
+          
+          // Clean up
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+          
+          // Show success message
+          setCopySuccess(`File "${filename || file.name}" downloaded successfully`);
       }
-    } else {
-      console.warn('No file data found for download:', fileId);
-      setUploadError('No file data available for download');
+      setTimeout(() => setCopySuccess(null), 3000);
+    } catch (error: unknown) {
+      console.error('Error downloading file:', error);
+      let errorMessage = 'Failed to download file';
+      
+      if (axios.isAxiosError(error)) {
+        errorMessage += `: ${error.response?.status || ''} ${error.message}`;
+        console.error('API error details:', error.response?.data);
+      } else if (error instanceof Error) {
+        errorMessage += `: ${error.message}`;
+      }
+      
+      setUploadError(errorMessage);
       setTimeout(() => setUploadError(null), 5000);
     }
   };
@@ -655,8 +884,9 @@ export default function Home() {
   };
 
   return (
-    <div className={cn("min-h-screen bg-background font-sans antialiased", geistSans.variable, geistMono.variable)}>
-      <Head>
+    <TooltipProvider>
+      <div className={`flex min-h-screen flex-col ${geistSans.variable} ${geistMono.variable} font-sans antialiased`}>
+        <Head>
         <title>Codex File Transfer</title>
         <meta name="description" content="Simple filesharing application that uses Codex and Waku" />
         <meta property="og:title" content="Codex File Transfer" />
@@ -689,11 +919,11 @@ export default function Home() {
           </p>
         </div>
       )}
-      
+
       <main className="flex-1 flex flex-col p-4 md:p-8 relative z-0">
         <div className="w-full max-w-5xl mx-auto">
-          {/* Combined Logo and Room ID Section */}
-          <div className="flex flex-col md:flex-row items-center justify-between mb-8 pb-4 gap-4">
+        {/* Combined Logo and Room ID Section */}
+        <div className="flex flex-col md:flex-row items-center justify-between mb-8 pb-4 gap-4">
             {/* Logo */}
             <div className="flex items-center gap-3 group md:w-1/4">
               <div className="p-2 rounded-lg bg-primary/15 shadow-sm group-hover:bg-primary/20 transition-all duration-300 border border-primary/10">
@@ -775,6 +1005,7 @@ export default function Home() {
                 <Github size={20} className="text-primary" />
               </a>
               
+              <WalletConnectButton />
               {/* Settings Sheet */}
               <Sheet>
                 <SheetTrigger asChild>
@@ -1012,6 +1243,110 @@ export default function Home() {
                         )}
                       </div>
                     </div>
+
+                    {/* TACo Settings */}
+                    <div className="space-y-4">
+                      <div className="flex items-center gap-2 justify-between">
+                        <div className="flex items-center gap-2">
+                          <div className="p-1.5 rounded-md bg-primary/10">
+                            <Shield size={16} className="text-primary" />
+                          </div>
+                          <h3 className="text-base font-medium font-mono">TACO_SETTINGS</h3>
+                        </div>
+                        {walletConnected ? (
+                          <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" title="Wallet connected"></div>
+                        ) : (
+                          <div className="w-2 h-2 rounded-full bg-amber-600/80" title="Wallet not connected"></div>
+                        )}
+                      </div>
+                      
+                      <div className="space-y-4 pl-2 ml-2 border-l border-border">
+                        <div className="space-y-2">
+                          <label className="text-sm font-medium font-mono">WALLET_CONNECTION</label>
+                          <WalletConnectButton className="w-full" />
+                          <p className="text-xs text-muted-foreground font-mono">
+                            {walletConnected 
+                              ? "Wallet connected - TACo encryption available" 
+                              : "Connect your wallet to enable TACo encryption"}
+                          </p>
+                        </div>
+                        
+                        {/* Encryption Toggle */}
+                        <div className="space-y-2">
+                          <label className="text-sm font-medium font-mono">ENCRYPTION</label>
+                          <div className="flex items-center space-x-2">
+                            <Switch 
+                              id="encryption-toggle"
+                              checked={useEncryption}
+                              onCheckedChange={setUseEncryption}
+                              disabled={!walletConnected}
+                            />
+                            <Label htmlFor="encryption-toggle" className="cursor-pointer">
+                              {useEncryption ? (
+                                <div className="flex items-center gap-2 text-primary">
+                                  <Lock className="h-4 w-4" />
+                                  <span>Encryption Enabled</span>
+                                </div>
+                              ) : (
+                                <div className="flex items-center gap-2 text-muted-foreground">
+                                  <Unlock className="h-4 w-4" />
+                                  <span>Encryption Disabled</span>
+                                </div>
+                              )}
+                            </Label>
+                          </div>
+                          <p className="text-xs text-muted-foreground font-mono">
+                            Protect your shared files with TACo encryption
+                          </p>
+                        </div>
+
+                        {/* Access Condition Controls - Only shown when encryption is on */}
+                        {useEncryption && walletConnected && (
+                          <div className="mt-3 p-2 bg-card/50 border border-primary/10 rounded-md">
+                            <div className="flex items-center gap-1 mb-3">
+                              <Shield size={12} className="text-primary/70" />
+                              <span className="text-xs font-medium text-primary/90 font-mono">ACCESS_CONDITION</span>
+                            </div>
+                            <div className="space-y-3 pl-4 border-l border-primary/10">
+                              <div ref={useEncryptionInputRef} className="space-y-2">
+                                <RadioGroup 
+                                  value={accessConditionType} 
+                                  onValueChange={(val) => setAccessConditionType(val as 'time' | 'positive')}
+                                  className="flex flex-col"
+                                >
+                                  <div className="flex items-center space-x-2">
+                                    <RadioGroupItem value="positive" id="positive" />
+                                    <Label htmlFor="positive" className="text-xs font-mono">POSITIVE_BALANCE</Label>
+                                  </div>
+                                  <div className="flex items-center space-x-2">
+                                    <RadioGroupItem value="time" id="time" />
+                                    <Label htmlFor="time" className="text-xs font-mono">TIME_WINDOW</Label>
+                                  </div>
+                                </RadioGroup>
+                              </div>
+                              
+                              {accessConditionType === 'time' && (
+                                <div ref={timeInputRef} className="space-y-1">
+                                  <Label htmlFor="window-time" className="text-xs font-mono text-muted-foreground">
+                                    WINDOW_TIME_IN_SECONDS
+                                  </Label>
+                                  <Input
+                                    id="window-time"
+                                    placeholder="3600"
+                                    value={windowTimeSeconds}
+                                    onChange={(e) => setWindowTimeSeconds(e.target.value)}
+                                    className="font-mono text-sm bg-card/70"
+                                  />
+                                  <p className="text-xs text-muted-foreground font-mono">
+                                    Access limited to specified time window in seconds
+                                  </p>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
                   </div>
                   
                   <SheetFooter className="mt-8 pt-4 border-t border-border flex gap-2 shrink-0">
@@ -1042,6 +1377,16 @@ export default function Home() {
               </Sheet>
             </div>
           </div>
+        <div className="grid gap-8">
+            {/* Scanline effect */}
+            <div className="absolute inset-0 pointer-events-none opacity-10 bg-scanline"></div>
+        </div>
+          
+          {/* Files being uploaded section */}
+          <div className="mt-8">
+            <h3 className="text-lg font-medium mb-4">
+              Uploading Files
+            </h3>
 
           {/* Upload Area */}
           <div 
@@ -1228,40 +1573,51 @@ export default function Home() {
             {/* Scanline effect */}
             <div className="absolute inset-0 pointer-events-none opacity-10 bg-scanline"></div>
           </div>
-
-          {/* Uploading Files Progress */}
-          {Object.keys(uploadingFiles).length > 0 && (
-            <div className="mb-8 space-y-4">
-              <h3 className="text-sm font-medium font-mono flex items-center gap-2">
-                <Upload size={14} className="text-primary" />
-                UPLOADING_FILES
-              </h3>
-              <div className="space-y-3">
+        
+            <div className="space-y-3">
                 {Object.entries(uploadingFiles).map(([fileId, file]) => (
+                  <>
                   <div key={fileId} className="p-3 bg-card rounded-lg border border-border">
-                    <div className="flex items-center justify-between mb-2">
-                      <div className="flex items-center gap-2">
-                        <div className="p-1.5 rounded-md bg-primary/10 text-primary">
+                    <div className="flex flex-col gap-1 text-sm">
+                      <h4 className="font-medium">{file.name}</h4>
+                      <div className="flex items-center text-xs text-muted-foreground">
+                        <div className="flex items-center gap-1">
                           {getFileIcon(file.type)}
+                          <span>{file.type.split('/')[1]?.toUpperCase() || 'FILE'}</span>
                         </div>
-                        <div>
-                          <p className="text-sm font-mono">{file.name}</p>
-                          <p className="text-xs text-muted-foreground font-mono">{file.size.toFixed(2)} MB</p>
+                        <span className="mx-1">•</span>
+                        <span>{file.size.toFixed(2)} MB</span>
+                      </div> 
+                      <div className="text-xs text-muted-foreground">
+                        {file.timestamp}
+                      </div> 
+                        {file.isEncrypted && (
+                        <div className="flex items-center text-yellow-600 dark:text-yellow-500 mt-1 text-xs">
+                          <Lock className="h-3 w-3 mr-1" />
+                          <span>Encrypted</span>
+                          {file.accessCondition && (
+                            <Tooltip>
+                              <TooltipTrigger> <Info className="h-3 w-3 ml-1 cursor-help" /> </TooltipTrigger>
+                              <TooltipContent>
+                                <p className="text-xs">{file.accessCondition}</p>
+                              </TooltipContent>
+                            </Tooltip>
+                          )}
                         </div>
-                      </div>
-                      <span className="text-xs font-mono text-primary">{file.progress}%</span>
+                      )}
                     </div>
-                    <div className="w-full bg-muted rounded-full h-1.5 overflow-hidden">
-                      <div 
-                        className="bg-primary h-full transition-all duration-300 ease-in-out" 
-                        style={{ width: `${file.progress}%` }}
-                      ></div>
-                    </div>
+                    <span className="text-xs font-mono text-primary">{file.progress}%</span>
                   </div>
+                  <div className="w-full bg-muted rounded-full h-1.5 overflow-hidden">
+                    <div 
+                      className="bg-primary h-full transition-all duration-300 ease-in-out"
+                      style={{ width: `${file.progress}%` }}
+                    ></div>
+                  </div>
+                  </>
                 ))}
               </div>
             </div>
-          )}
 
           {/* Sent and Received Files Tabs */}
           <Tabs defaultValue="sent" className="w-full">
@@ -1292,7 +1648,15 @@ export default function Home() {
                                 {getFileIcon(file.type)}
                               </div>
                               <div className="min-w-0 flex-1 overflow-hidden">
-                                <p className="font-medium text-sm font-mono truncate">{file.name}</p>
+                                <p className="font-medium text-sm font-mono truncate">{file.name}
+                                  {file.isEncrypted &&
+                                  <Tooltip>
+                                    <TooltipTrigger> <Lock size={14} /> </TooltipTrigger>
+                                    <TooltipContent>
+                                      {file.accessCondition}
+                                    </TooltipContent>
+                                  </Tooltip>}
+                                </p>
                                 <p className="text-xs text-muted-foreground font-mono truncate">{file.size.toFixed(2)} MB • {file.timestamp}</p>
                               </div>
                             </div>
@@ -1365,7 +1729,15 @@ export default function Home() {
                                 {getFileIcon(file.type)}
                               </div>
                               <div className="min-w-0 flex-1 overflow-hidden">
-                                <p className="font-medium text-sm font-mono truncate">{file.name}</p>
+                                <p className="font-medium text-sm font-mono truncate">{file.name}
+                                  {file.isEncrypted &&
+                                  <Tooltip>
+                                    <TooltipTrigger> <Lock size={14} /> </TooltipTrigger>
+                                    <TooltipContent>
+                                      {file.accessCondition}
+                                    </TooltipContent>
+                                  </Tooltip>}
+                                </p>
                                 <p className="text-xs text-muted-foreground font-mono truncate">{file.size.toFixed(2)} MB • {file.timestamp}</p>
                                 {file.fileId && (
                                   <p className="text-xs text-primary/70 font-mono truncate" title={file.fileId}>
@@ -1480,5 +1852,6 @@ export default function Home() {
         }
       `}</style>
     </div>
+    </TooltipProvider>
   );
 }
