@@ -1,7 +1,7 @@
 import React from "react";
 import { Lock, Shield } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { useWallet } from "@/context/wallet-context";
+import { useWallet } from "@/context/WalletContext";
 
 interface WalletConnectButtonProps {
   className?: string;

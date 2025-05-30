@@ -10,6 +10,12 @@ const compat = new FlatCompat({
 });
 
 const eslintConfig = [
+  // Ignore patterns for directories and files that should not be linted
+  {
+    ignores: [
+      "**/.next/**", // Exclude all files in the .next directory
+    ],
+  },
   ...compat.extends("next/core-web-vitals", "next/typescript"),
 ];
 
