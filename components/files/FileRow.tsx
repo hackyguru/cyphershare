@@ -3,6 +3,7 @@ import { Button } from "@/components/ui/button";
 import { Copy, Download, File, FileText, Image as ImageIcon } from "lucide-react";
 import { useFileTransfer } from "@/context/FileTransferContext";
 import EncryptionBadge from "./EncryptionBadge";
+import { Tooltip, TooltipProvider, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 
 import { FileItem } from "@/types/files";
 
@@ -46,26 +47,43 @@ export const FileRow = ({ file }: FileRowProps) => {
         </div>
       </div>
       <div className="flex items-center gap-1 flex-shrink-0 ml-2">
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={() => copyFileCid(file.id.toString())}
-          className="h-7 w-7 p-0"
-          disabled={!file.fileId}
-          title="Copy CID"
-        >
-          {copySuccess === file.id.toString() ? <span className="text-green-500">✓</span> : <Copy size={14} />}
-        </Button>
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={() => downloadFile(file.id.toString())}
-          className="h-7 w-7 p-0"
-          disabled={!file.fileId}
-          title="Download file"
-        >
-          <Download size={14} />
-        </Button>
+        <TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => copyFileCid(file.id.toString())}
+                  className="h-7 w-7 p-0"
+                  disabled={!file.fileId}
+              >
+                {copySuccess === file.id.toString() ? <span className="text-green-500">✓</span> : <Copy size={14} />}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent className="font-mono text-xs">
+              Copy CID
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+
+        <TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => downloadFile(file.id.toString())}
+                  className="h-7 w-7 p-0"
+                  disabled={!file.fileId}
+              >
+                <Download size={14} />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent className="font-mono text-xs">
+              Download file
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
       </div>
     </div>
   );
