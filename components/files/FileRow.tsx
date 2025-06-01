@@ -52,6 +52,7 @@ export const FileRow = ({ file }: FileRowProps) => {
           onClick={() => copyFileCid(file.id.toString())}
           className="h-7 w-7 p-0"
           disabled={!file.fileId}
+          title="Copy CID"
         >
           {copySuccess === file.id.toString() ? <span className="text-green-500">✓</span> : <Copy size={14} />}
         </Button>
@@ -61,6 +62,7 @@ export const FileRow = ({ file }: FileRowProps) => {
           onClick={() => downloadFile(file.id.toString())}
           className="h-7 w-7 p-0"
           disabled={!file.fileId}
+          title="Download file"
         >
           <Download size={14} />
         </Button>
