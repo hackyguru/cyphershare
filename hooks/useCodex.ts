@@ -378,10 +378,27 @@ export class CodexClient {
         }
 
         xhr.open("POST", url, true);
-        xhr.setRequestHeader("Content-Type", file.type);
+
+        // --- MODIFIED SECTION FOR Content-Type HANDLING ---
+        let contentTypeToSend = file.type;
+        if (file.name.toLowerCase().endsWith(".py")) {
+          contentTypeToSend = "text/plain";
+          console.log(
+            `useCodex: Overriding Content-Type to 'text/plain' for .py file: ${file.name}`
+          );
+        } else if (!file.type && file.name) {
+          // Added file.name check to avoid issues if file object is unusual
+          contentTypeToSend = "application/octet-stream";
+          console.log(
+            `useCodex: No file.type, defaulting Content-Type to 'application/octet-stream' for: ${file.name}`
+          );
+        }
+        xhr.setRequestHeader("Content-Type", contentTypeToSend);
+        // --- END OF MODIFIED SECTION ---
+
         xhr.setRequestHeader(
           "Content-Disposition",
-          `attachment; filename='${file.name}'`
+          `attachment; filename="${encodeURIComponent(file.name)}"`
         );
 
         // Add auth headers if they exist
@@ -394,6 +411,8 @@ export class CodexClient {
         xhr.onload = function () {
           // Log the raw response text first, before any parsing
           console.log("=== RAW CODEX UPLOAD RESPONSE ===");
+          console.log("File Name:", file.name);
+          console.log("File Type Sent by Client:", contentTypeToSend); // Log the type we actually sent
           console.log("Status:", xhr.status);
           console.log("Response Text:", xhr.responseText);
           console.log("Response Headers:", xhr.getAllResponseHeaders());
@@ -402,43 +421,45 @@ export class CodexClient {
           if (xhr.status >= 200 && xhr.status < 300) {
             try {
               // Try to parse as JSON
-              let response;
+              let responseJson; // Renamed from 'response' to avoid conflict
+              const responseTextTrimmed = xhr.responseText.trim();
               try {
-                response = JSON.parse(xhr.responseText);
-                console.log("Parsed JSON response:", response);
+                responseJson = JSON.parse(responseTextTrimmed);
+                console.log("Parsed JSON response:", responseJson);
               } catch {
                 // Response is not JSON, using raw text
-                console.log("Response is not JSON, using raw text");
-                response = xhr.responseText.trim();
+                console.log(
+                  "Response is not JSON, using raw text:",
+                  responseTextTrimmed
+                );
+                // No need to assign responseTextTrimmed to responseJson here
               }
 
               // Extract the CID from the response
               const cid =
-                typeof response === "object"
-                  ? response.id ||
-                    response.cid ||
-                    (response.data && (response.data.id || response.data.cid))
-                  : response;
+                typeof responseJson === "object" && responseJson !== null // Check if responseJson is an object
+                  ? responseJson.id ||
+                    responseJson.cid ||
+                    (responseJson.data &&
+                      (responseJson.data.id || responseJson.data.cid))
+                  : responseTextTrimmed; // Fallback to raw text
 
-              if (!cid) {
+              console.log("Extracted CID:", cid);
+
+              if (!cid || typeof cid !== "string" || cid.length < 10) {
+                // Basic CID validity check
                 console.warn(
-                  "No CID found in Codex upload response:",
-                  response
+                  "No valid CID found in Codex upload response for file:",
+                  file.name,
+                  "Raw response:",
+                  xhr.responseText
                 );
-                // Try to extract CID from raw response if it's just a string
-                const rawResponse = xhr.responseText.trim();
-                if (
-                  rawResponse &&
-                  !rawResponse.includes("{") &&
-                  !rawResponse.includes("[")
-                ) {
-                  console.log("Using raw response as CID:", rawResponse);
-                  resolve({
-                    success: true,
-                    id: rawResponse,
-                  });
-                  return;
-                }
+                resolve({
+                  success: true, // Upload might have succeeded on server, but client couldn't get CID
+                  id: undefined, // Explicitly undefined
+                  error: "No valid CID found in response",
+                });
+                return;
               } else {
                 console.log(
                   "%c File uploaded successfully! CID: " + cid,
@@ -450,20 +471,32 @@ export class CodexClient {
                 success: true,
                 id: cid,
               });
-            } catch {
-              // If response is not JSON but status is success
-              console.warn("Failed to parse Codex upload response");
-              console.log("Raw response text:", xhr.responseText);
-
-              // If the response is a plain string, it might be the CID directly
+            } catch (parseError) {
+              // Catch errors during the CID extraction logic itself
+              console.warn(
+                "Failed to parse or process Codex upload response for file:",
+                file.name,
+                parseError
+              );
+              console.log("Raw response text was:", xhr.responseText);
+              // If response is not JSON but status is success, and it's just a string, it might be the CID
               const rawText = xhr.responseText.trim();
-              resolve({
-                success: true,
-                id: rawText, // Use the raw text as the ID
-              });
+              if (rawText && !rawText.includes("{") && !rawText.includes("[")) {
+                resolve({ success: true, id: rawText });
+              } else {
+                resolve({
+                  success: false,
+                  error: "Failed to process upload response",
+                });
+              }
             }
           } else {
-            console.error("Upload failed with status:", xhr.status);
+            console.error(
+              "Upload failed with status:",
+              xhr.status,
+              "for file:",
+              file.name
+            );
             let errorMessage = "Upload failed";
             try {
               const errorResponse = JSON.parse(xhr.responseText);
@@ -479,7 +512,7 @@ export class CodexClient {
         };
 
         xhr.onerror = function () {
-          console.error("Network error during upload");
+          console.error("Network error during upload for file:", file.name);
           resolve({
             success: false,
             error: "Network error occurred during upload",
@@ -589,7 +622,7 @@ export class CodexClient {
         }
         return {
           success: true,
-          id: "unknown-id",
+          id: "unknown-id", // Should ideally be undefined if no CID
           message: "Upload successful but no CID found",
         };
       } catch {
@@ -644,10 +677,10 @@ export class CodexClient {
       console.log(`Fetching metadata from: ${metadataUrl}`);
 
       const response = await fetch(metadataUrl, {
-        method: "POST",
+        method: "POST", // This is unusual for getting metadata, usually GET
         headers: {
           Accept: "application/json",
-          "Content-Type": "application/json",
+          "Content-Type": "application/json", // Also unusual to send content-type for POST without body to get metadata
           ...(this.authHeaders || {}),
         },
         mode: "cors",
@@ -712,7 +745,7 @@ export class CodexClient {
       const response = await fetch(downloadUrl, {
         method: "GET",
         headers: {
-          Accept: "*/*",
+          Accept: "*/*", // This is fine for generic download
           ...(this.authHeaders || {}),
         },
         mode: "cors",
@@ -761,9 +794,16 @@ export function getCodexClient(
 ): CodexClient {
   if (!codexClientInstance) {
     codexClientInstance = new CodexClient(baseUrl, endpointType);
-  } else if (baseUrl && endpointType) {
+  } else if (baseUrl !== undefined && endpointType !== undefined) {
+    // Check if params are actually passed
     codexClientInstance.updateConfig(baseUrl, endpointType);
-  }
+  } else if (baseUrl !== undefined && codexClientInstance.getEndpointType()) {
+    // If only baseUrl is passed
+    codexClientInstance.updateConfig(
+      baseUrl,
+      codexClientInstance.getEndpointType()
+    );
+  } // Potentially more conditions if only endpointType is passed, or rely on constructor defaults
 
   return codexClientInstance;
 }
@@ -800,7 +840,9 @@ export function useCodex(
   const [isNodeActive, setIsNodeActive] = useState<boolean>(false);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
-  const [endpointType, setEndpointType] = useState<CodexEndpointType>("remote");
+  const [endpointType, setEndpointType] = useState<CodexEndpointType>(
+    client.getEndpointType()
+  ); // Initialize from client
 
   // Check node status
   const checkNodeStatus = useCallback(
@@ -829,49 +871,50 @@ export function useCodex(
 
   // Update the configuration
   const updateConfig = useCallback(
-    (newUrl: string, endpointType: CodexEndpointType): void => {
+    (newUrl: string, newEndpointType: CodexEndpointType): void => {
+      // Renamed endpointType to newEndpointType
       try {
         // Allow proxy paths (starting with /) or full URLs
         if (!newUrl.startsWith("/") && !newUrl.startsWith("http")) {
-          throw new Error(
-            "URL must start with '/  ' or 'http://' or 'https://'"
-          );
+          throw new Error("URL must start with '/' or 'http://' or 'https://'");
         }
 
-        client.updateConfig(newUrl, endpointType);
-        setEndpointType(endpointType);
-        checkNodeStatus(true);
+        client.updateConfig(newUrl, newEndpointType);
+        setEndpointType(newEndpointType); // Update local state for the hook consumer
+        checkNodeStatus(true); // Re-check status after config update
       } catch (err) {
         setError(
-          `Invalid URL: ${err instanceof Error ? err.message : String(err)}`
+          `Invalid URL or config: ${
+            err instanceof Error ? err.message : String(err)
+          }`
         );
       }
     },
-    [client, checkNodeStatus]
+    [client, checkNodeStatus] // Added checkNodeStatus to dependencies
   );
 
   // Initial check on mount and periodic checks
   useEffect(() => {
-    checkNodeStatus();
+    checkNodeStatus(); // Initial check
 
     const intervalId = setInterval(() => {
-      checkNodeStatus();
+      checkNodeStatus(); // Periodic check
     }, 60000); // Check every minute
 
-    return () => clearInterval(intervalId);
-  }, [checkNodeStatus]);
+    return () => clearInterval(intervalId); // Cleanup interval on unmount
+  }, [checkNodeStatus]); // Only depends on checkNodeStatus
 
   return {
-    client,
+    client, // The actual client instance
     isNodeActive,
     isLoading,
     error,
-    endpointType,
+    endpointType, // The current endpointType the hook is aware of
     checkNodeStatus,
-    updateConfig,
-    baseUrl: client.getBaseUrl(),
-    getNodeInfo: client.getNodeInfo.bind(client),
-    getCodexClient: () => getCodexClient(),
+    updateConfig, // Function to update client config and hook state
+    baseUrl: client.getBaseUrl(), // Convenience accessor
+    getNodeInfo: client.getNodeInfo.bind(client), // Bound method
+    getCodexClient: () => getCodexClient(), // Get the singleton (might be useful for outside React lifecycle)
     testDirectUpload: client.testDirectUpload.bind(client),
     uploadFile: client.uploadFile.bind(client),
     downloadFile: client.downloadFile.bind(client),
